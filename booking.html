@@ -950,6 +950,14 @@ body {
                 >
             </div>
 
+            <div class="form-group" id="finalPayoutGroup" style="display:none;">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                    <input type="checkbox" id="finalPayout" style="width:auto;">
+                    100% Paid – Final Payout
+                </label>
+                <small style="color:var(--muted);">For platform bookings: the amount received becomes the final booking revenue, and the outstanding balance becomes R0.</small>
+            </div>
+
             <div class="form-group">
                 <label for="paymentPercentage">
                     Payment Percentage
@@ -1615,6 +1623,12 @@ function openPaymentModal() {
     ).value = "";
 
 
+    const platformBooking = ["booking.com", "airbnb", "lekkeslaap"]
+        .includes(String(currentBooking.booking_source || "").toLowerCase());
+    document.getElementById("finalPayoutGroup").style.display =
+        platformBooking && !currentBooking.final_payout ? "block" : "none";
+    document.getElementById("finalPayout").checked = false;
+
     document.getElementById(
         "paymentModal"
     ).classList.add("open");
@@ -1645,6 +1659,11 @@ function calculatePaymentPercentage() {
         getBookingTotal();
 
 
+    if (document.getElementById("finalPayout").checked) {
+        document.getElementById("paymentPercentage").value = "100.00%";
+        return;
+    }
+
     const percentage =
         bookingTotal > 0
             ? (
@@ -1667,168 +1686,79 @@ function calculatePaymentPercentage() {
 ========================= */
 
 async function savePayment() {
+    if (!currentBooking) return;
+    const amount = Number(document.getElementById("paymentAmount").value);
+    const paymentDate = document.getElementById("paymentDate").value;
+    const paymentMethod = document.getElementById("paymentMethod").value;
+    const notes = document.getElementById("paymentNotes").value.trim();
+    const finalPayout = document.getElementById("finalPayout").checked;
+    const bookingTotal = getBookingTotal();
+    const alreadyReceived = getAmountReceived();
+    const outstanding = Math.max(0, bookingTotal - alreadyReceived);
 
-    const amount =
-        Number(
-            document.getElementById(
-                "paymentAmount"
-            ).value
-        );
-
-    const paymentDate =
-        document.getElementById(
-            "paymentDate"
-        ).value;
-
-    const paymentMethod =
-        document.getElementById(
-            "paymentMethod"
-        ).value;
-
-    const notes =
-        document.getElementById(
-            "paymentNotes"
-        ).value.trim();
-
-
-    if (
-        !amount ||
-        amount <= 0
-    ) {
-
-        alert(
-            "Please enter a valid payment amount."
-        );
-
+    if (!Number.isFinite(amount) || amount <= 0) {
+        alert("Please enter a valid payment amount."); return;
+    }
+    if (!paymentDate || !paymentMethod) {
+        alert("Please enter a payment date and method."); return;
+    }
+    if (currentBooking.final_payout) {
+        alert("This booking has already been finalized."); return;
+    }
+    if (finalPayout) {
+        if (!["booking.com", "airbnb", "lekkeslaap"].includes(
+            String(currentBooking.booking_source || "").toLowerCase())) {
+            alert("Final payout is only available for platform bookings."); return;
+        }
+        if (currentPayments.length > 0) {
+            alert("A platform final payout must be the only payment for this booking."); return;
+        }
+        if (amount > bookingTotal + 0.01) {
+            alert("Final payout cannot exceed the original booking total."); return;
+        }
+    } else if (amount > outstanding + 0.01) {
+        alert("The payment cannot be greater than the outstanding balance of " + money(outstanding) + ".");
         return;
     }
 
-
-    if (!paymentDate) {
-
-        alert(
-            "Please select the payment date."
-        );
-
-        return;
-    }
-
-
-    if (!paymentMethod) {
-
-        alert(
-            "Please select a payment method."
-        );
-
-        return;
-    }
-
-
-    const bookingTotal =
-        getBookingTotal();
-
-    const alreadyReceived =
-        getAmountReceived();
-
-    const outstanding =
-        Math.max(
-            0,
-            bookingTotal -
-            alreadyReceived
-        );
-
-
-    if (
-        amount >
-        outstanding + 0.01
-    ) {
-
-        alert(
-            "The payment cannot be greater than the outstanding balance of " +
-            money(outstanding) +
-            "."
-        );
-
-        return;
-    }
-
-
-    const paymentPercentage =
-        bookingTotal > 0
-            ? (
-                amount /
-                bookingTotal *
-                100
-              )
-            : 0;
-
-
-    const button =
-        document.getElementById(
-            "savePaymentButton"
-        );
-
+    const button = document.getElementById("savePaymentButton");
     button.disabled = true;
-    button.textContent =
-        "Saving...";
-
-
-    const { error } =
-        await supabaseClient
-            .from("payments")
-            .insert({
-                booking_id:
-                    currentBooking.id,
-
-                payment_percentage:
-                    Number(
-                        paymentPercentage.toFixed(2)
-                    ),
-
-                amount:
-                    Number(
-                        amount.toFixed(2)
-                    ),
-
-                payment_date:
-                    paymentDate,
-
-                payment_method:
-                    paymentMethod,
-
-                notes:
-                    notes || null
+    button.textContent = "Saving...";
+    try {
+        if (finalPayout) {
+            // One database transaction: insert payment + replace booking totals.
+            const { error } = await supabaseClient.rpc("rsainn_record_final_payout", {
+                p_booking_id: String(currentBooking.id),
+                p_property_id: PROPERTY_ID,
+                p_amount: Number(amount.toFixed(2)),
+                p_payment_date: paymentDate,
+                p_payment_method: paymentMethod,
+                p_notes: notes || null
             });
-
-
-    button.disabled = false;
-    button.textContent =
-        "Save Payment";
-
-
-    if (error) {
-
-        console.error(
-            "Payment save error:",
-            error
-        );
-
-        alert(
-            "Unable to save payment: " +
-            error.message
-        );
-
-        return;
+            if (error) throw error;
+        } else {
+            const percentage = bookingTotal > 0 ? amount / bookingTotal * 100 : 0;
+            const { error } = await supabaseClient.from("payments").insert({
+                booking_id: currentBooking.id,
+                payment_percentage: Number(percentage.toFixed(2)),
+                amount: Number(amount.toFixed(2)),
+                payment_date: paymentDate,
+                payment_method: paymentMethod,
+                notes: notes || null
+            });
+            if (error) throw error;
+        }
+        closePaymentModal();
+        // Reload the booking too: the final payout changes its stored total.
+        await loadBooking();
+        alert(finalPayout ? "Final payout recorded. Booking is 100% paid." : "Payment recorded successfully.");
+    } catch (error) {
+        console.error("Payment save error:", error);
+        alert("Unable to save payment: " + error.message);
+    } finally {
+        button.disabled = false;
+        button.textContent = "Save Payment";
     }
-
-
-    closePaymentModal();
-
-    await loadPayments();
-
-    alert(
-        "Payment recorded successfully."
-    );
 }
 
 /* =========================
@@ -2239,6 +2169,10 @@ async function saveBookingChanges() {
             );
 
 
+        if (currentBooking.final_payout && datesChanged) {
+            throw new Error("This booking has a finalized payout. Stay dates cannot be changed without reopening its financial record.");
+        }
+
         const updateData = {
 
             guest_name: guestName,
@@ -2260,9 +2194,11 @@ async function saveBookingChanges() {
             accommodation_total:
                 accommodationTotal,
 
-            total_due: totalDue,
-
-            total_amount: totalDue,
+            // Finalized booking revenue must not be reset by guest-detail edits.
+            ...(!currentBooking.final_payout ? {
+                total_due: totalDue,
+                total_amount: totalDue
+            } : {}),
 
             updated_at:
                 new Date().toISOString()
@@ -2342,6 +2278,9 @@ document
         "input",
         calculatePaymentPercentage
     );
+
+document.getElementById("finalPayout")
+    .addEventListener("change", calculatePaymentPercentage);
 
 
 document
